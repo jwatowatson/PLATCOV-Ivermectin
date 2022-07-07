@@ -1,0 +1,863 @@
+---
+title: "PLATCOV Statistical Analysis: Ivermectin"
+author: "James Watson"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: yes
+    fig_caption: yes
+    keep_md: yes
+  pdf_document:
+    toc: yes
+  word_document:
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(cache = T, cache.comments = FALSE,
+                      echo = F, include = TRUE, 
+                      fig.width = 8, fig.height = 8,
+                      fig.pos = 'H',dev = 'png', dpi = 300)
+
+library(rstan)
+library(lme4)
+library(rstanarm)
+library(loo)
+library(RColorBrewer)
+library(censReg)
+library(tictoc)
+library(reshape2)
+library(dplyr)
+library(plotrix)
+```
+
+TODO list:
+
+* Flow diagram output
+
+
+## Preambule
+
+This is the analysis of the Ivermectin arm of the PLATCOV study
+
+Data preparation is done in a different R script called data_prep.R.
+This Markdown script assumes that the data are saved in a .csv file *Ivermectin_analysis.csv* in long format. 
+The intention to treat population (all randomised patients included in this analysis)
+The file *Ivermectin_analysis.csv* contains the patient clinical and viral load data with the following column headers:
+
+- ID: anonymised patient id code
+- Time: time from randomisation
+- Trt: treatment allocation as written in CRF
+- Site: site at enrolment
+- Timepoint_ID: Day of study (integer 0 to 14)
+- BARCODE: unique sample id code (in the following format: PLT-site-number-swab type-timepoint)
+- Swab_ID: RTS or TSL (right versus left tonsil)
+- Plate: unique Plate ID for the PCR assay (matching with plate identifiers in interim_control_dat.csv)
+- Rand_date: date of randomisation
+- Any_dose: (0/1) any doses of any manufacturer received
+- N_dose: integer number of doses received (any manufacturer)
+- Antibody_test: 0/1 (negative/positive for SARS-CoV-2 antibody rapid test)
+- Weight (kg)
+- BMI: kg/weight^2
+- Age: (years - has to be between 18-50)
+- Sex: 0/1 (male: 1; female/other: 0)
+- Symptom_onset: time since onset of symptoms (days)
+- Variant: variant of concern (using standard WHO terminology for the main lineages, reference will be the predominant variant in the dataset at the start of the study)
+- CT_NS: observed CT value for the N/S gene
+- CT_RNaseP: observed CT value for the human RNase P gene
+- Per_protocol_sample: whether at the time of sampling the patient was still in per protocol with respect to drug dosing
+- IgG: + IgG band on the LFT
+- IgM: + IgM band on the LFT
+- log10_viral_load: log10 number of viral copies per mL (estimated from control samples using a mixed effects model)
+- log10_cens_vl: censoring value
+
+
+
+## Computational setup
+
+```{r}
+## information on software/hardware used
+version
+sessionInfo()
+
+study_threshold = 1.125
+
+rstan_options(auto_write = TRUE)
+## parameters for the analysis
+Dmax = 8
+RUN_MODELS = F
+source('../functions.R') # some useful plotting functions (bespoke)
+```
+
+## Load data
+
+```{r}
+# Load randomisation data for the full ITT population
+ITT_pop = read.csv('ITT_population.csv')
+writeLines('ITT population:')
+table(ITT_pop$Treatment)
+
+platcov_dat = read.csv('Ivermectin_analysis.csv')
+if(any(!platcov_dat$ID %in% ITT_pop$ID)){
+  writeLines('These IDs are in the PCR database but are not in the ITT database:')
+  print(unique(platcov_dat$ID[!platcov_dat$ID %in% ITT_pop$ID]))
+}
+if(any(!ITT_pop$ID %in% platcov_dat$ID)){
+  writeLines('These IDs are in the ITT database but are not in the PCR database:')
+  print(unique(ITT_pop$ID[!ITT_pop$ID %in% platcov_dat$ID]))
+}
+
+# Note that PLT-TH1-056 left the study just after randomization so they do not to have any PCR data
+platcov_dat$Trt = plyr::mapvalues(platcov_dat$Trt,
+                                  from = 'Regeneron',
+                                  to='Casirivimab/\nimdevimab')
+trts = c("Casirivimab/\nimdevimab","Ivermectin")
+
+all(platcov_dat$Trt %in% c('No study drug',trts))
+
+ind_na_time = is.na(platcov_dat$Time)
+writeLines(sprintf('Missing time for following samples: %s',
+                   unique(platcov_dat$ID[ind_na_time])))
+platcov_dat$Time[ind_na_time]=platcov_dat$Timepoint_ID[ind_na_time]
+
+ind_neg_time = platcov_dat$Time < 0
+writeLines(sprintf('Negative time for following samples: %s',
+                   unique(platcov_dat$ID[ind_neg_time])))
+platcov_dat$Time[ind_neg_time]=platcov_dat$Timepoint_ID[ind_neg_time]
+
+
+# make per protocol summary for all patients
+PP=merge(aggregate(Timepoint_ID ~ ID+Trt,
+                   platcov_dat[platcov_dat$Per_protocol_sample==1, ], max),
+         aggregate(Per_protocol_sample ~ ID, platcov_dat, sum),by = 'ID')
+PP$Include_mITT = PP$Timepoint_ID>=2
+
+
+# We remove patients who have no detectable virus
+xx_undetectble = table(platcov_dat$ID, platcov_dat$CT_NS==40)
+ids_neg = names(which(xx_undetectble[,1]==0))
+writeLines(sprintf('All negative samples for id: %s', ids_neg))
+
+platcov_dat = platcov_dat[!platcov_dat$ID %in% ids_neg, ]
+PP$Include_mITT[PP$ID %in% ids_neg] = F
+```
+
+
+## Data summaries
+
+Display the per protocol matrix
+
+```{r pp}
+writeLines('Number of patients per arm in modified intention to treat analysis')
+table(PP$Trt, Include_mITT = PP$Include_mITT)
+
+writeLines('Number of swabs per protocol per treatment')
+table(PP$Trt, PP_swabs = PP$Per_protocol_sample)
+```
+
+
+
+```{r data_summaries}
+IDs = unique(platcov_dat$ID)
+platcov_dat$Rand_date = as.POSIXct(platcov_dat$Rand_date)
+
+writeLines(sprintf('We have %s PCR datapoints on %s patients from %s sites between %s and %s',
+                   length(unique(platcov_dat$BARCODE)),
+                   length(IDs),
+                   length(unique(platcov_dat$Site)),
+                   min(platcov_dat$Rand_date),
+                   max(platcov_dat$Rand_date)))
+
+ind_dup = !duplicated(platcov_dat$ID)
+
+
+par(las=1, cex.lab=1.5, cex.axis=1.5, family='serif')
+plot(platcov_dat$Rand_date[ind_dup], 1:length(IDs),
+     col= adjustcolor(as.numeric(as.factor(platcov_dat$Variant[ind_dup])),.5),
+     pch = 15-platcov_dat$Variant_Imputed[ind_dup]*15+1,
+     xlab='Randomisation date', ylab='Sequential patient number',
+     panel.first=grid())
+legend('topleft',col = 1:length(unique(platcov_dat$Variant)),
+       legend = levels(as.factor(platcov_dat$Variant[ind_dup])),pch=16,inset = 0.03)
+legend('left',col=1, pch=c(16,1),legend = c('Genotyped','Imputed'),inset = 0.03)
+
+
+# baseline samples: taken within 6 hours of randomisation
+baseline_ind = platcov_dat$Timepoint_ID==0
+
+bvl = aggregate(log10_viral_load ~ ID + Site, 
+                platcov_dat[baseline_ind, ], median)
+nrow(bvl) == length(IDs)
+
+ind_analysis= bvl$ID %in% PP$ID[PP$Include_mITT]
+writeLines(sprintf('The analysis dataset contains %s patients. The geometric mean baseline (defined as samples taken within 6 hours of randomisation) viral load was %s copies per mL (IQR: %s to %s; range from %s to %s)',
+                   sum(ind_analysis),
+                   round(10^mean(bvl$log10_viral_load[ind_analysis])),
+                   round(10^(quantile(bvl$log10_viral_load[ind_analysis],.25))),
+                   round(10^(quantile(bvl$log10_viral_load[ind_analysis],.75))),
+                   round(min(10^bvl$log10_viral_load)),
+                   round(max(10^bvl$log10_viral_load))))
+```
+
+
+Summary table
+
+```{r table1}
+print(unique(platcov_dat$Trt))
+platcov_dat$Trt_code = 
+  factor(platcov_dat$Trt,
+         levels=c("No study drug", trts))
+
+xx=make_baseline_table(input_data = platcov_dat[platcov_dat$ID %in% PP$ID[PP$Include_mITT],])
+knitr::kable(xx, caption = sprintf('Summary of patient characteristics included in the current interim analysis (n= %s). Age: median (range); baseline viral load (log10 copies per mL: mean (range)); vaccinated: %% with any number of doses; number of vaccine doses: median (range); antibody data are from rapid tests done at screening (+ is presence of IgM or IgG band).', sum(PP$Include_mITT)))
+```
+
+
+## Summary data plot
+
+```{r trt_data_plot, fig.width=10, fig.height=7}
+par(las=1, cex.lab=1.5, cex.axis=1.5, family='serif', mfrow=c(1,2))
+ind_plot = platcov_dat$ID %in% PP$ID[PP$Include_mITT]
+plot_baseline_data(platcov_dat[ind_plot,])
+mtext(text = 'a',side = 3,adj = 0,cex=1.5,line = 1.5)
+
+trt_cols = brewer.pal(n = length(unique(platcov_dat$Trt)),
+                      name = 'Dark2')
+plot_serial_data(xx = platcov_dat[ind_plot,],
+                 Trt = platcov_dat$Trt[ind_plot],
+                 trt_cols = trt_cols)
+mtext(text = 'b',side = 3,adj = 0,cex=1.5,line = 1.5)
+```
+
+
+## Model fitting
+### Specify priors
+
+```{r priors}
+source('../priors.R')
+```
+
+
+### Prepare model
+
+Make stan data set.
+
+Covariates that we use in model 2:
+
+* Vaccination (number of doses)
+* Age (standardised to have mean=0 and sd=1)
+* Time since symptom onset (days, between 0 and 4)
+* Variant (WHO variants of concern) - when available (this is replaced by epoch until we have variant data)
+* Serology rapid test (+/-)
+* Serum antibody: not yet decided which antibody will be measured - expected May/June 2022
+
+
+```{r}
+platcov_dat = dplyr::arrange(platcov_dat, 
+                             log10_viral_load==log10_cens_vl,
+                             Time)
+
+# Datapoints that will be used in the analysis
+ind_fitting = platcov_dat$Time < Dmax & 
+  platcov_dat$Per_protocol_sample==1 &
+  platcov_dat$ID %in% PP$ID[PP$Include_mITT]
+
+writeLines(sprintf('Total number of datapoints up until day %s is %s',Dmax, sum(ind_fitting)))
+
+platcov_dat$Variant = factor(platcov_dat$Variant, levels = c('Delta','BA.1','BA.2'))
+platcov_dat$Site = factor(platcov_dat$Site, levels = c('th001','th057','th058'))
+covs_base = c('Variant','Site')
+covs_full=c(covs_base,
+            'Age_scaled',
+            'Antibody_test',
+            'Symptom_onset',
+            'N_dose')
+
+writeLines('Number of patients per arm in analysis:')
+table(platcov_dat$Trt_code[ind_fitting & !duplicated(platcov_dat$ID)])
+stan_inputs = 
+  make_stan_inputs(input_data_fit = platcov_dat[ind_fitting,],
+                   int_covs_base = covs_base,
+                   int_covs_full = covs_full,
+                   slope_covs_base = covs_base,
+                   slope_covs_full = covs_full,
+                   trt_frmla = formula('~Trt_code'),
+                   Dmax = Dmax)
+```
+
+
+### Setup model runs
+
+We fit a sequence of Bayesian hierarchical models.
+To make sure there are no bugs in the code (all stan code is written specifically for this trial analysis), I fit the following sequence of models of increasing complexity:
+
+* Model 0: vanilla student-t regression with left censoring at 0 and with individual random effects for slope and intercept;
+* Model 1: add the RNaseP measurements;
+* Model 2: Add covariate adjustment;
+* Model 3: Non-linear model (up and then down) with RNaseP adjustment.
+
+```{r run_models}
+all_mods = list.files('../Stan_models',full.names = TRUE,pattern = '*stan')
+print(all_mods)
+basic_settings = data.frame(mod = all_mods[1],
+                            prior = 1,
+                            cov_matrices = 1)
+model_settings = rbind(basic_settings,
+                       expand.grid(mod = all_mods[2:3],
+                                   prior = 1:length(all_priors),
+                                   cov_matrices = 1:2))
+model_settings$Niter = 5000
+model_settings$Nwarmup = 2000
+model_settings$Nthin = 10
+model_settings$Nchain = 4
+
+writeLines(sprintf('We are running all models with %s chains and %s samples for each chain, discarding half for burn-in and thining every %s, thus giving a total of %s posterior samples per model.',
+                   unique(model_settings$Nchain),
+                   unique(model_settings$Niter),
+                   unique(model_settings$Nthin), 
+                   unique(model_settings$Nchain*(model_settings$Niter-model_settings$Nwarmup)/model_settings$Nthin)))
+
+
+save(model_settings, stan_inputs, all_priors, file = 'Rout/model_run_setup.RData')
+```
+
+
+Models are run on a remote cluster using the R script *run_models.R'* and the bash script *bmrc.sh*. Each model is given a seed for reproducibility.
+
+Load model fits:
+
+```{r}
+ff = list.files('Rout/')
+ff = ff[grep(pattern = 'model_fits_',x = ff)]
+if(!length(ff)==nrow(model_settings)) stop('not all outputs are ready for all model settings')
+model_settings$mod = as.factor(model_settings$mod)
+```
+
+### Model fits: summaries
+
+
+```{r summary}
+key_pars_1 = c('trt_effect', 'alpha_0', 'beta_0',
+               'sigma_logvl', 'sigmasq_u', 't_dof')
+key_pars_2 = c(key_pars_1, 'gamma_rnasep','slope_coefs', 'intercept_coefs')
+key_pars_3 = c(key_pars_2, 'tmax_pop')
+key_pars = list(key_pars_1, key_pars_2, key_pars_3)
+
+out_all = list()
+for(i in 1:nrow(model_settings)){
+  writeLines(sprintf('\n*********************\nSummary of posterior distribution for model %s using priors %s and treatment matrix %s',
+                     model_settings$mod[i], 
+                     model_settings$prior[i], 
+                     model_settings$trt_mat[i]))
+  load(paste0('Rout/model_fits_',i,'.RData'))
+  out_all[[i]] = out
+  rm(out)
+}
+```
+
+
+### Model comparisons using loo
+
+```{r loo}
+loo_out = list()
+for(mm in 1:length(out_all)){
+  log_lik = extract_log_lik(out_all[[mm]], merge_chains = FALSE)
+  r_eff = relative_eff(exp(log_lik))
+  loo_out[[mm]] = loo(log_lik, r_eff = r_eff, cores = 2)
+  print(loo_out[[mm]])
+}
+comp = loo_compare(loo_out[2:3])
+print(comp) # can set simplify=FALSE for more detailed print output
+
+comp = loo_compare(loo_out[4:5])
+print(comp) #
+
+comp = loo_compare(loo_out[6:7])
+print(comp) #
+
+comp = loo_compare(loo_out[8:9])
+print(comp) #
+```
+
+
+## Results
+
+### Estimated treatment effects under the 4 models
+
+Posterior distributions over the treatment effects for the interventions. Red: no effect; blue: median inferred effect.
+
+```{r treatment_effects}
+effect_ests = prob_superior = trt_estimate = list()
+
+for(mm in 1:nrow(model_settings)){
+  trt_estimate[[mm]] = exp(colMeans(extract(out_all[[mm]])$trt_effect))
+  prob_superior[[mm]] =
+    round(100*apply(extract(out_all[[mm]])$trt_effect,
+                    2,function(x) mean(x> log(study_threshold))),1)
+  effect_ests[[mm]]=
+    summary(out_all[[mm]],pars='trt_effect',
+            probs = c(0.025, 0.1, 0.9, 0.975))$summary[,c('mean','2.5%','10%','90%','97.5%')]
+  
+  names(trt_estimate[[mm]]) = trts
+  names(prob_superior[[mm]]) = trts
+  rownames(effect_ests[[mm]]) = trts
+}
+
+writeLines('\n*******************\nMean estimated treatment effects (multiplicative):')
+print(do.call(rbind, trt_estimate))
+
+writeLines('\n*******************\nProbability of super-superiority:')
+print(do.call(rbind, prob_superior))
+```
+
+
+Overall effects
+
+```{r treatment_effect_plot, fig.width=8, fig.height=6}
+# the model used for all effect estimates
+model_report = which(model_settings$prior==1&
+                       model_settings$mod==all_mods[2]&
+                       model_settings$cov_matrices==1)
+# the main models shown in the main text
+main_models = which((model_settings$prior==1 & 
+                       model_settings$cov_matrices==1 &
+                       model_settings$mod!=all_mods[1]) |
+                      (model_settings$prior==1 & 
+                         model_settings$cov_matrices==2 &
+                         model_settings$mod==all_mods[2]))
+
+
+kp=key_pars[[which(model_settings$mod[model_report]==levels(model_settings$mod))]]
+
+print(summary(out_all[[model_report]],
+              pars=kp)$summary[,c('mean','sd','2.5%','97.5%','n_eff','Rhat')])
+
+thetas_main_model = extract(out_all[[model_report]])
+
+k_r=2
+writeLines(sprintf('Under model %s the change in rate of clearance for Ivermectin compared to no study drug is %s%% (95%%CI: %s%% to %s%%)',
+                   model_report,
+                   round(100*(exp(mean(thetas_main_model$trt_effect[,2]))-1),k_r),
+                   round(100*(exp(quantile(thetas_main_model$trt_effect[,2],0.025))-1),k_r),
+                   round(100*(exp(quantile(thetas_main_model$trt_effect[,2],0.975))-1),k_r)))
+
+writeLines(sprintf('Under model %s the change in rate of clearance for Regeneron compared to no study drug is %s%% (95%%CI: %s%% to %s%%)',
+                   model_report,
+                   round(100*(exp(mean(thetas_main_model$trt_effect[,1]))-1),k_r),
+                   round(100*(exp(quantile(thetas_main_model$trt_effect[,1],0.025))-1),k_r),
+                   round(100*(exp(quantile(thetas_main_model$trt_effect[,1],0.975))-1),k_r)))
+
+
+thetas_NL = extract(out_all[[main_models[2]]])
+
+writeLines('The main 3 models with weakly informative priors:')
+mod_cols = brewer.pal(n = length(main_models), name = 'Set1')
+par(las=1, bty='n', mar=c(4,10,2,2), cex.lab=1.3, cex.axis=1.3)
+source('../functions.R')
+plot_effect_estimates(effect_ests = effect_ests,
+                      plot_models = main_models,
+                      mod_cols = mod_cols,
+                      study_threshold = study_threshold)
+legend('topright', col=mod_cols, pch=16, legend = c('Linear','Non-linear','Linear + covariates'),lwd=3)
+```
+
+
+Covariate effects on the intercept (baseline viral load) and slope (viral clearance):
+
+```{r cov_effects,fig.height=5, fig.width=9}
+coef_mod = which(model_settings$mod == all_mods[2] &
+                   model_settings$cov_matrices==1 & 
+                   model_settings$prior==1)
+
+par(mfrow=c(1,2),las=1,family='serif',mar=c(5,7,2,2))
+plot_coef_effects(stan_out = out_all,model_plot = coef_mod,cov_mat = 1,stan_inputs = stan_inputs)
+
+coef_mod = which(model_settings$mod == all_mods[2] &
+                   model_settings$cov_matrices==2 & 
+                   model_settings$prior==1)
+
+par(mfrow=c(1,2),las=1,family='serif',mar=c(5,7,2,2))
+plot_coef_effects(stan_out = out_all,model_plot = coef_mod,cov_mat = 2,stan_inputs = stan_inputs)
+```
+
+### Slopes over time
+
+Plot the absolute slope estimate for each individual over time
+
+```{r slopes_over_time}
+names(trt_cols)=c('No study drug', trts)
+ids_stan = stan_inputs$analysis_data_stan$id[stan_inputs$analysis_data_stan$ind_start]
+ids_true = plyr::mapvalues(ids_stan, 
+                           from = stan_inputs$ID_map$ID_stan,
+                           to = stan_inputs$ID_map$ID_key)
+ind_dup = !duplicated(platcov_dat$ID)
+trt_allocations=plyr::mapvalues(ids_true, 
+                                from=platcov_dat$ID[ind_dup],
+                                to=platcov_dat$Trt[ind_dup])
+rand_date = as.POSIXct(plyr::mapvalues(ids_true, 
+                                       from =platcov_dat$ID[ind_dup],
+                                       to =as.character(platcov_dat$Rand_date[ind_dup])))
+var_geno=plyr::mapvalues(ids_true, 
+                         from=platcov_dat$ID[ind_dup],
+                         to=platcov_dat$Variant[ind_dup])
+
+writeLines(sprintf('Slopes plot for model setting %s', model_report))
+print(model_settings[model_report, ])
+
+slopes = thetas_main_model$slope
+slopes_non_lin = thetas_NL$slope
+
+ylims = c(5, 70) # hours
+my_y_vals = c(5,20,40,70)#seq(0, ymax, length.out = 4)
+my_y_labels = round(my_y_vals)
+trts_comp = c('Casirivimab/\nimdevimab','Ivermectin')
+
+controls_ind = trt_allocations=='No study drug'
+ivm_ind = trt_allocations=='Ivermectin'
+REGN_ind = trt_allocations=='Casirivimab\nimdevimab'
+
+rate_mean = colMeans(slopes)
+t_12_med = 24*log10(.5)/(apply(slopes,2,mean))
+t_12_up = 24*log10(.5)/(apply(slopes,2,quantile,.9))
+t_12_low = 24*log10(.5)/(apply(slopes,2,quantile,.1))
+
+t_12_med_NL= -24*log10(.5)/(apply(slopes_non_lin,2,mean))
+t_12_up_NL = -24*log10(.5)/(apply(slopes_non_lin,2,quantile,.9))
+t_12_low_NL = -24*log10(.5)/(apply(slopes_non_lin,2,quantile,.1))
+
+
+writeLines(sprintf('In the no study drug arm the mean clearance half life was %s (range %s to %s)',
+                   round(mean(t_12_med[controls_ind]),1),
+                   round(min(t_12_med[controls_ind]),1),
+                   round(max(t_12_med[controls_ind]),1)))
+writeLines(sprintf('In the ivermectin arm the mean clearance half life was %s (range %s to %s)',
+                   round(mean(t_12_med[ivm_ind]),1),
+                   round(min(t_12_med[ivm_ind]),1),
+                   round(max(t_12_med[ivm_ind]),1)))
+writeLines(sprintf('In the ivermectin arm the mean clearance half life was %s (range %s to %s)',
+                   round(mean(t_12_med[REGN_ind]),1),
+                   round(min(t_12_med[REGN_ind]),1),
+                   round(max(t_12_med[REGN_ind]),1)))
+
+writeLines(sprintf('The model estimated population mean clearance half-life is %s (95%% CI %s-%s)',
+                   round(mean(24*log10(0.5)/thetas_main_model$beta_0),1),
+                   round(quantile(24*log10(0.5)/thetas_main_model$beta_0,.025),1),
+                   round(quantile(24*log10(0.5)/thetas_main_model$beta_0,.975),1)))
+
+par(mfrow=c(3,1), mar = c(3,5,0.5,1),las=1,
+    family='serif', cex.lab=1.5, cex.axis=1.5)
+
+for(tt in c('No study drug', trts_comp)){
+  ind = grep(pattern = tt,x = trt_allocations)
+  plot(rand_date[ind], t_12_med[ind],
+       col=trt_cols[trt_allocations[ind]],
+       xlab='', xaxt='n', yaxt='n',cex=1.5,
+       ylim= ylims,panel.first=grid(),
+       ylab='Clearance half-life (hours)', 
+       xlim=range(rand_date),pch=14+as.numeric(var_geno)[ind])
+  
+  abline(h=mean(24*log10(0.5)/thetas_main_model$beta_0),lty=2)
+  polygon(as.POSIXct(c('2021-01-01','2023-01-01',
+                       '2023-01-01','2021-01-01')),
+          c(quantile(24*log10(0.5)/thetas_main_model$beta_0,
+                     c(.025,.025,.975,.975))),
+          border = NA, col=adjustcolor('grey',.3))
+  points(rand_date[ind], t_12_med[ind],
+         col=trt_cols[trt_allocations[ind]],
+         cex=1.5,pch=14+as.numeric(var_geno)[ind])
+  axis(2, at=my_y_vals, labels = my_y_labels)
+  if(tt == 'Casirivimab/\nimdevimab'){
+    legend('right',legend = c('Delta','BA.1','BA.2'),
+           title = 'Variant',pch=15:17, inset = 0.03,cex=1.7)
+  } 
+  text(x = as.POSIXct('2021-11-15'),y = 60,
+       labels = paste0(tt,' (n=',length(ind),')'),cex=2)
+  
+  
+  for(i in ind){
+    lines(rep(rand_date[i],2), 
+          c(t_12_low[i], t_12_up[i]),
+          col=trt_cols[trt_allocations[i]])
+  }
+  
+  axis(1, at = c(as.POSIXct(c('2021-10-01',
+                              '2021-12-01',
+                              '2022-02-01',
+                              '2022-03-27'))), 
+       labels = c('Oct 21','Dec 21','Feb 22','Apr 22'),cex.axis=2)
+}
+
+
+
+## Non-linear slopes
+for(tt in c('No study drug', trts_comp)){
+  ind = grep(pattern = tt,x = trt_allocations)
+  plot(rand_date[ind], t_12_med_NL[ind],
+       col=trt_cols[trt_allocations[ind]],
+       xlab='', xaxt='n', yaxt='n',cex=1.5,
+       ylim= ylims,panel.first=grid(),
+       ylab='Clearance half-life (hours)', 
+       xlim=range(rand_date),pch=14+as.numeric(var_geno)[ind])
+  
+  abline(h=mean(-24*log10(0.5)/thetas_NL$beta_0[,2]),lty=2)
+  polygon(as.POSIXct(c('2021-01-01','2023-01-01',
+                       '2023-01-01','2021-01-01')),
+         -c(quantile(24*log10(0.5)/thetas_NL$beta_0[,2],
+                     c(.025,.025,.975,.975))),
+          border = NA, col=adjustcolor('grey',.3))
+  points(rand_date[ind], t_12_med_NL[ind],
+         col=trt_cols[trt_allocations[ind]],
+         cex=1.5,pch=14+as.numeric(var_geno)[ind])
+  axis(2, at=my_y_vals, labels = my_y_labels)
+  if(tt == 'Casirivimab/\nimdevimab'){
+    legend('right',legend = c('Delta','BA.1','BA.2'),
+           title = 'Variant',pch=15:17, inset = 0.03,cex=1.7)
+  } 
+  text(x = as.POSIXct('2021-11-15'),y = 60,
+       labels = paste0(tt,' (n=',length(ind),')'),cex=2)
+  
+  
+  for(i in ind){
+    lines(rep(rand_date[i],2), 
+          c(t_12_low_NL[i], t_12_up_NL[i]),
+          col=trt_cols[trt_allocations[i]])
+  }
+  
+  axis(1, at = c(as.POSIXct(c('2021-10-01',
+                              '2021-12-01',
+                              '2022-02-01',
+                              '2022-03-27'))), 
+       labels = c('Oct 21','Dec 21','Feb 22','Apr 22'),cex.axis=2)
+}
+```
+
+
+changes in half life
+
+```{r}
+t12_delta_IVM = 24*(log10(0.5)/(exp(thetas_main_model$trt_effect[,2])*(thetas_main_model$beta_0)) -
+                      log10(0.5)/(thetas_main_model$beta_0))
+
+t12_delta_REGN = 24*(log10(0.5)/(exp(thetas_main_model$trt_effect[,1])*(thetas_main_model$beta_0)) -
+                       log10(0.5)/(thetas_main_model$beta_0))
+
+writeLines(sprintf('In the Ivermectin arm the mean change in half life is %s (95%% CI %s to %s)',
+                   round(mean(t12_delta_IVM),2),
+                   round(quantile(t12_delta_IVM,0.025),2),
+                   round(quantile(t12_delta_IVM,0.975),2)))
+
+writeLines(sprintf('In the Regeneron arm the mean change in half life is %s (95%% CI %s to %s)',
+                   round(mean(t12_delta_REGN),2),
+                   round(quantile(t12_delta_REGN,0.025),2),
+                   round(quantile(t12_delta_REGN,0.975),2)))
+```
+
+
+Plot the individual slope estimates by group
+
+```{r slopes_by_group}
+AUC_ivm=as.numeric(
+  plyr::mapvalues(ids_true,
+                  from=platcov_dat$ID[ind_dup],
+                  to=platcov_dat$AUC_72[ind_dup]))
+Cmax_ivm=as.numeric(
+  plyr::mapvalues(ids_true,
+                  from=platcov_dat$ID[ind_dup],
+                  to=platcov_dat$CMAX_72[ind_dup]))
+
+trt_summary_dat = 
+  data.frame(trt = trt_allocations,
+             t_12 = t_12_med,
+             t_12_up = t_12_up,
+             t_12_low = t_12_low,
+             col = trt_cols[trt_allocations],
+             var = as.numeric(var_geno),
+             AUC_ivm = AUC_ivm,
+             Cmax_ivm = Cmax_ivm,
+             rate_mean = rate_mean)
+
+trt_summary_dat = dplyr::arrange(trt_summary_dat, trt, t_12)
+par( mar = c(5,8,2,2),las=1,
+     family='serif', cex.lab=1.3, cex.axis=1.3)
+
+xlims = ylims
+my_x_vals = seq(xlims[1], xlims[2], length.out = 4)
+my_x_labels = round(my_x_vals)
+plot(trt_summary_dat$t_12, 1:nrow(trt_summary_dat),
+     col=trt_summary_dat$col, yaxt='n', xaxt='n',
+     xlim=xlims, panel.first=grid(),
+     xlab='Clearance half-life (hours)', 
+     pch=trt_summary_dat$var+14, ylab='')
+axis(1, at = my_x_vals,labels = my_x_labels)
+abline(v=mean(24*log10(0.5)/thetas_main_model$beta_0),lty=2)
+polygon(c(quantile(24*log10(0.5)/thetas_main_model$beta_0,
+                   c(.025,.975,.975,.025))),
+        c(-100,-100,100,100),
+        border = NA, col=adjustcolor('grey',.3))
+
+for(i in 1:nrow(trt_summary_dat)){
+  lines(c(trt_summary_dat$t_12_low[i],
+          trt_summary_dat$t_12_up[i]),
+        rep(i,2),col=trt_summary_dat$col[i])
+}
+for(tt in unique(trt_summary_dat$trt)){
+  mid_point = median(which(trt_summary_dat$trt==tt))
+  axis(2, at = mid_point, labels = tt, col = trt_cols, tick = F)
+}
+legend('bottomright',legend = c('Delta','BA.1','BA.2'),
+       title = 'Variant',pch=15:17, inset = 0.03)
+```
+
+
+Some exploratory covariate analyses
+
+```{r}
+trt_summary_dat$trt = factor(trt_summary_dat$trt,
+                             levels=c('No study drug',trts_comp))
+summary(lm(t_12 ~ trt,trt_summary_dat))
+
+trt_summary_dat$AUC_ivm[trt_summary_dat$trt=='No study drug']=0
+trt_summary_dat$Cmax_ivm[trt_summary_dat$trt=='No study drug']=0
+
+par(las=1, mfrow=c(1,2))
+plot(trt_summary_dat$AUC_ivm, trt_summary_dat$rate_mean,
+     xlab='AUC 0-72 hours', ylab = 'Clearance rate', main='')
+plot(trt_summary_dat$Cmax_ivm, trt_summary_dat$rate_mean,
+     xlab='Cmax 0-72 hours', ylab = 'Clearance rate', main='')
+
+summary(lm(rate_mean ~ AUC_ivm, trt_summary_dat))
+summary(lm(rate_mean ~ Cmax_ivm, trt_summary_dat))
+```
+
+
+
+
+### Individual plots
+
+Individual plots colored by model
+
+```{r individ_fits}
+par(las=1, mfrow=c(4,4), mar=c(4,5,2,0),bty='n', 
+    cex.lab=1.5, cex.axis=1.5,family='serif')
+set.seed(46465);
+mod_cols = sample(brewer.pal(n = 9, name = 'Set1'))
+ID_map = stan_inputs$ID_map
+ID_map$Trt = plyr::mapvalues(ID_map$ID_key, 
+                             from = platcov_dat$ID[ind_dup], 
+                             to = platcov_dat$Trt[ind_dup])
+plot_individ_data(mod_out = out_all,
+                  models_plot = main_models[1:2],
+                  K_plots = 16,
+                  mod_cols = mod_cols,
+                  ID_map = ID_map,
+                  analysis_data_stan = stan_inputs$analysis_data_stan)
+```
+
+
+## Sensitivity analysis
+
+### Treatment effects
+
+```{r treatment_effect_sensitivity}
+my_pch = rep(1,9)
+my_pch[model_settings$mod==all_mods[3]]=2
+plot_effect_estimates(effect_ests = effect_ests,
+                      plot_models = 1:9,
+                      my_pch = my_pch,
+                      study_threshold = study_threshold)
+```
+
+
+### Left vs right tonsil
+
+```{r left_versus_right}
+par(las=1, bty='n', cex.lab=1.5,
+    cex.axis=1.5,family='serif',mfrow=c(2,2))
+
+dd_CT_NS = dcast(platcov_dat[,c('ID','Timepoint_ID',
+                                'Swab_ID','CT_NS')],
+                 ID+Timepoint_ID~Swab_ID,
+                 value.var="CT_NS",
+                 fun.aggregate = mean)
+
+dd_RNaseP = dcast(platcov_dat[,c('ID','Timepoint_ID',
+                                 'Swab_ID','CT_RNaseP')],
+                  ID+Timepoint_ID~Swab_ID,
+                  value.var="CT_RNaseP",
+                  fun.aggregate = mean)
+
+plot((dd_CT_NS$RTS+dd_CT_NS$TSL)/2, 
+     dd_CT_NS$RTS-dd_CT_NS$TSL,
+     xlab='Mean viral CT (left & right)', 
+     ylab='Difference in viral CT (left-right)',
+     panel.first=grid())
+hist(dd_CT_NS$RTS-dd_CT_NS$TSL, breaks=50,main='',
+     xlab='Difference in viral CT (left-right)')
+plot((dd_RNaseP$RTS+dd_RNaseP$TSL)/2,
+     dd_RNaseP$RTS-dd_RNaseP$TSL,
+     xlab='Mean RNaseP CT (left & right)', 
+     ylab='Difference in RNaseP CT (left-right)',
+     panel.first=grid())
+hist(dd_RNaseP$RTS-dd_RNaseP$TSL,breaks = 50,main='',
+     xlab='Difference in RNaseP CT (left-right)')
+
+par(mfrow=c(1,1))
+plot(dd_RNaseP$RTS-dd_RNaseP$TSL, 
+     dd_CT_NS$RTS-dd_CT_NS$TSL,
+     xlab='Difference in RNaseP CT (left-right)',
+     ylab='Difference in viral CT (left-right)',
+     panel.first=grid())
+cor_out = cor.test(dd_RNaseP$RTS-dd_RNaseP$TSL, 
+                   dd_CT_NS$RTS-dd_CT_NS$TSL)
+mtext(text = sprintf('Pearson correlation is %s',round(cor_out$estimate,2)),side = 3,line = 0)
+```
+
+
+
+### Quality Control for PCR
+
+```{r PCR_QC}
+control_dat=read.csv('../interim_control_dat.csv')
+par(las=1, mfrow=c(2,2), cex.lab=1.5, cex.axis=1.5,family='serif')
+plot(control_dat$log10_true_density,control_dat$CT_NS, 
+     ylab='CT value', 
+     xlab='Control viral density (log10 copies/mL)',
+     panel.first=grid(),
+     col=as.numeric(as.factor(control_dat$Plate)), ylim=c(40,18))
+my_slope_coefs = array(dim = c(length(unique(control_dat$Plate)),2))
+
+for(ss in unique(control_dat$Plate)){
+  plate_ind = control_dat$Plate==ss
+  mod = lm(CT_NS~log10_true_density, control_dat[plate_ind, ])
+  abline(mod,col = control_dat$Plate[plate_ind])
+  my_slope_coefs[which(ss==unique(control_dat$Plate)),]=coef(mod)
+}
+
+hist(my_slope_coefs[,1], xlab='Intercept', main='')
+writeLines(sprintf('SD of the intercept is %s',round(sd(my_slope_coefs[,1]),2)))
+
+hist(my_slope_coefs[,2], xlab='Slope', main='')
+writeLines(sprintf('Maximum difference in CT values for a tenfold change in viral load is %s',round(diff(range(my_slope_coefs[,2])),2)))
+
+xx = aggregate(CT_NS ~ Plate + log10_true_density, 
+               data = control_dat, 
+               function(x) c(mean(x), diff(x)))
+par(las=1)
+plot(xx$CT[,1], xx$CT[,2], 
+     xlab = 'Mean CT',
+     ylab = 'CT Difference from duplicates',
+     panel.first=grid())
+abline(h = 0)
+
+xx$Mean_CT = cut(xx$CT[,1],breaks = seq(20, 40, by=5),include.lowest = T)
+xx$Diff_CT = xx$CT[,2]
+
+par(mfrow=c(1,1))
+yy = aggregate(Diff_CT ~ Mean_CT, xx, sd)
+plot(yy$Mean_CT, sqrt(2) * yy$Diff_CT, xlab='CT interval',
+     ylab = 'Estimated measurement error (standard deviation)')
+```
+
+
+
+

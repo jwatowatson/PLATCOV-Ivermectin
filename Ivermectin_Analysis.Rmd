@@ -31,9 +31,6 @@ library(dplyr)
 library(plotrix)
 ```
 
-TODO list:
-
-* Flow diagram output
 
 
 ## Preambule
@@ -50,7 +47,6 @@ The file *Ivermectin_analysis.csv* contains the patient clinical and viral load 
 - Trt: treatment allocation as written in CRF
 - Site: site at enrolment
 - Timepoint_ID: Day of study (integer 0 to 14)
-- BARCODE: unique sample id code (in the following format: PLT-site-number-swab type-timepoint)
 - Swab_ID: RTS or TSL (right versus left tonsil)
 - Plate: unique Plate ID for the PCR assay (matching with plate identifiers in interim_control_dat.csv)
 - Rand_date: date of randomisation
@@ -66,8 +62,6 @@ The file *Ivermectin_analysis.csv* contains the patient clinical and viral load 
 - CT_NS: observed CT value for the N/S gene
 - CT_RNaseP: observed CT value for the human RNase P gene
 - Per_protocol_sample: whether at the time of sampling the patient was still in per protocol with respect to drug dosing
-- IgG: + IgG band on the LFT
-- IgM: + IgM band on the LFT
 - log10_viral_load: log10 number of viral copies per mL (estimated from control samples using a mixed effects model)
 - log10_cens_vl: censoring value
 
@@ -80,7 +74,7 @@ The file *Ivermectin_analysis.csv* contains the patient clinical and viral load 
 version
 sessionInfo()
 
-study_threshold = 1.125
+study_threshold = 1.125 # corresponds to 12.5% increase in rate of clearance
 
 rstan_options(auto_write = TRUE)
 ## parameters for the analysis
@@ -172,14 +166,15 @@ ind_dup = !duplicated(platcov_dat$ID)
 
 
 par(las=1, cex.lab=1.5, cex.axis=1.5, family='serif')
-plot(platcov_dat$Rand_date[ind_dup], 1:length(IDs),
-     col= adjustcolor(as.numeric(as.factor(platcov_dat$Variant[ind_dup])),.5),
-     pch = 15-platcov_dat$Variant_Imputed[ind_dup]*15+1,
+ix=order(platcov_dat$Rand_date[ind_dup])
+plot(platcov_dat$Rand_date[ind_dup][ix], 1:length(IDs),
+     col= adjustcolor(as.numeric(as.factor(platcov_dat$Variant[ind_dup][ix])),.5),
+     pch = 15-platcov_dat$Variant_Imputed[ind_dup][ix]*15+1,
      xlab='Randomisation date', ylab='Sequential patient number',
      panel.first=grid())
 legend('topleft',col = 1:length(unique(platcov_dat$Variant)),
        legend = levels(as.factor(platcov_dat$Variant[ind_dup])),pch=16,inset = 0.03)
-legend('left',col=1, pch=c(16,1),legend = c('Genotyped','Imputed'),inset = 0.03)
+# legend('left',col=1, pch=c(16,1),legend = c('Genotyped','Imputed'),inset = 0.03)
 
 
 # baseline samples: taken within 6 hours of randomisation
@@ -453,7 +448,6 @@ thetas_NL = extract(out_all[[main_models[2]]])
 writeLines('The main 3 models with weakly informative priors:')
 mod_cols = brewer.pal(n = length(main_models), name = 'Set1')
 par(las=1, bty='n', mar=c(4,10,2,2), cex.lab=1.3, cex.axis=1.3)
-source('../functions.R')
 plot_effect_estimates(effect_ests = effect_ests,
                       plot_models = main_models,
                       mod_cols = mod_cols,
@@ -514,7 +508,7 @@ trts_comp = c('Casirivimab/\nimdevimab','Ivermectin')
 
 controls_ind = trt_allocations=='No study drug'
 ivm_ind = trt_allocations=='Ivermectin'
-REGN_ind = trt_allocations=='Casirivimab\nimdevimab'
+REGN_ind = trt_allocations=='Casirivimab/\nimdevimab'
 
 rate_mean = colMeans(slopes)
 t_12_med = 24*log10(.5)/(apply(slopes,2,mean))
@@ -530,11 +524,11 @@ writeLines(sprintf('In the no study drug arm the mean clearance half life was %s
                    round(mean(t_12_med[controls_ind]),1),
                    round(min(t_12_med[controls_ind]),1),
                    round(max(t_12_med[controls_ind]),1)))
-writeLines(sprintf('In the ivermectin arm the mean clearance half life was %s (range %s to %s)',
+writeLines(sprintf('In the Ivermectin arm the mean clearance half life was %s (range %s to %s)',
                    round(mean(t_12_med[ivm_ind]),1),
                    round(min(t_12_med[ivm_ind]),1),
                    round(max(t_12_med[ivm_ind]),1)))
-writeLines(sprintf('In the ivermectin arm the mean clearance half life was %s (range %s to %s)',
+writeLines(sprintf('In the Regeneron arm the mean clearance half life was %s (range %s to %s)',
                    round(mean(t_12_med[REGN_ind]),1),
                    round(min(t_12_med[REGN_ind]),1),
                    round(max(t_12_med[REGN_ind]),1)))
@@ -544,7 +538,7 @@ writeLines(sprintf('The model estimated population mean clearance half-life is %
                    round(quantile(24*log10(0.5)/thetas_main_model$beta_0,.025),1),
                    round(quantile(24*log10(0.5)/thetas_main_model$beta_0,.975),1)))
 
-par(mfrow=c(3,1), mar = c(3,5,0.5,1),las=1,
+par(mfrow=c(3,1), mar = c(5,5,2,2),las=1,
     family='serif', cex.lab=1.5, cex.axis=1.5)
 
 for(tt in c('No study drug', trts_comp)){
@@ -589,46 +583,46 @@ for(tt in c('No study drug', trts_comp)){
 
 
 
-## Non-linear slopes
-for(tt in c('No study drug', trts_comp)){
-  ind = grep(pattern = tt,x = trt_allocations)
-  plot(rand_date[ind], t_12_med_NL[ind],
-       col=trt_cols[trt_allocations[ind]],
-       xlab='', xaxt='n', yaxt='n',cex=1.5,
-       ylim= ylims,panel.first=grid(),
-       ylab='Clearance half-life (hours)', 
-       xlim=range(rand_date),pch=14+as.numeric(var_geno)[ind])
-  
-  abline(h=mean(-24*log10(0.5)/thetas_NL$beta_0[,2]),lty=2)
-  polygon(as.POSIXct(c('2021-01-01','2023-01-01',
-                       '2023-01-01','2021-01-01')),
-         -c(quantile(24*log10(0.5)/thetas_NL$beta_0[,2],
-                     c(.025,.025,.975,.975))),
-          border = NA, col=adjustcolor('grey',.3))
-  points(rand_date[ind], t_12_med_NL[ind],
-         col=trt_cols[trt_allocations[ind]],
-         cex=1.5,pch=14+as.numeric(var_geno)[ind])
-  axis(2, at=my_y_vals, labels = my_y_labels)
-  if(tt == 'Casirivimab/\nimdevimab'){
-    legend('right',legend = c('Delta','BA.1','BA.2'),
-           title = 'Variant',pch=15:17, inset = 0.03,cex=1.7)
-  } 
-  text(x = as.POSIXct('2021-11-15'),y = 60,
-       labels = paste0(tt,' (n=',length(ind),')'),cex=2)
-  
-  
-  for(i in ind){
-    lines(rep(rand_date[i],2), 
-          c(t_12_low_NL[i], t_12_up_NL[i]),
-          col=trt_cols[trt_allocations[i]])
-  }
-  
-  axis(1, at = c(as.POSIXct(c('2021-10-01',
-                              '2021-12-01',
-                              '2022-02-01',
-                              '2022-03-27'))), 
-       labels = c('Oct 21','Dec 21','Feb 22','Apr 22'),cex.axis=2)
-}
+# ## Non-linear slopes
+# for(tt in c('No study drug', trts_comp)){
+#   ind = grep(pattern = tt,x = trt_allocations)
+#   plot(rand_date[ind], t_12_med_NL[ind],
+#        col=trt_cols[trt_allocations[ind]],
+#        xlab='', xaxt='n', yaxt='n',cex=1.5,
+#        ylim= ylims,panel.first=grid(),
+#        ylab='Clearance half-life (hours)', 
+#        xlim=range(rand_date),pch=14+as.numeric(var_geno)[ind])
+#   
+#   abline(h=mean(-24*log10(0.5)/thetas_NL$beta_0[,2]),lty=2)
+#   polygon(as.POSIXct(c('2021-01-01','2023-01-01',
+#                        '2023-01-01','2021-01-01')),
+#          -c(quantile(24*log10(0.5)/thetas_NL$beta_0[,2],
+#                      c(.025,.025,.975,.975))),
+#           border = NA, col=adjustcolor('grey',.3))
+#   points(rand_date[ind], t_12_med_NL[ind],
+#          col=trt_cols[trt_allocations[ind]],
+#          cex=1.5,pch=14+as.numeric(var_geno)[ind])
+#   axis(2, at=my_y_vals, labels = my_y_labels)
+#   if(tt == 'Casirivimab/\nimdevimab'){
+#     legend('right',legend = c('Delta','BA.1','BA.2'),
+#            title = 'Variant',pch=15:17, inset = 0.03,cex=1.7)
+#   } 
+#   text(x = as.POSIXct('2021-11-15'),y = 60,
+#        labels = paste0(tt,' (n=',length(ind),')'),cex=2)
+#   
+#   
+#   for(i in ind){
+#     lines(rep(rand_date[i],2), 
+#           c(t_12_low_NL[i], t_12_up_NL[i]),
+#           col=trt_cols[trt_allocations[i]])
+#   }
+#   
+#   axis(1, at = c(as.POSIXct(c('2021-10-01',
+#                               '2021-12-01',
+#                               '2022-02-01',
+#                               '2022-03-27'))), 
+#        labels = c('Oct 21','Dec 21','Feb 22','Apr 22'),cex.axis=2)
+# }
 ```
 
 
@@ -730,6 +724,49 @@ summary(lm(rate_mean ~ Cmax_ivm, trt_summary_dat))
 ```
 
 
+Illustrative PK plot
+
+```{r pk_predicted_profiles}
+sim_dat1 = read.csv('patients.csv',skip=1)
+sim_dat1 = sim_dat1[sim_dat1$ID==1 & sim_dat1$AMT==0, ]
+sim_dat1$TIME = as.numeric(sim_dat1$TIME)
+
+sim_dat2 = read.csv('healthy.csv',skip=1)
+sim_dat2 = sim_dat2[sim_dat2$ID==1 & sim_dat2$AMT==0, ]
+sim_dat2$TIME = as.numeric(sim_dat2$TIME)
+
+my_f = function(x) {
+  y = as.numeric(x)/log(10);
+  quantile(x = y,  probs = c(0.025, .1, .5, .9, .975))
+}
+xx_patients = aggregate(DV ~ TIME, data = sim_dat1, my_f)
+xx_healthy = aggregate(DV ~ TIME, data = sim_dat2, my_f)
+par(las=1, cex.lab=1.2, cex.axis=1.2, family='serif')
+plot(xx_patients$TIME/24, xx_patients$DV[,3], ylim = c(1, 3),
+     yaxt='n', type='l',lwd=3, xlab='Days', panel.first=grid(),
+     ylab = "Plasma concentration (ng/ml)")
+axis(2, at = 1:3, labels = 10^(1:3))
+axis(2, at = log10(seq(10, 100, by=10)),labels = NA)
+axis(2, at = log10(seq(100, 1000, by=100)),labels = NA)
+lines(xx_healthy$TIME/24, xx_healthy$DV[,3], lwd=3, col='lightblue',lty=2)
+
+polygon(x = c(xx_healthy$TIME, rev(xx_healthy$TIME))/24,
+        y = c(xx_healthy$DV[,1], rev(xx_healthy$DV[,5])),
+        border = NA, col = adjustcolor('lightblue',.2) )
+polygon(x = c(xx_healthy$TIME, rev(xx_healthy$TIME))/24,
+        y = c(xx_healthy$DV[,2], rev(xx_healthy$DV[,4])),
+        border = NA, col = adjustcolor('lightblue',.3) )
+
+polygon(x = c(xx_patients$TIME, rev(xx_patients$TIME))/24,
+        y = c(xx_patients$DV[,1], rev(xx_patients$DV[,5])),
+        border = NA, col = adjustcolor('grey',.2) )
+polygon(x = c(xx_patients$TIME, rev(xx_patients$TIME))/24,
+        y = c(xx_patients$DV[,2], rev(xx_patients$DV[,4])),
+        border = NA, col = adjustcolor('grey',.3) )
+
+legend('topright', lty=1:2, legend = c('Patients','Healthy volunteers'),
+       col=c('black','lightblue'),lwd=2,inset=0.03,cex=1.3)
+```
 
 
 ### Individual plots
@@ -759,12 +796,16 @@ plot_individ_data(mod_out = out_all,
 ### Treatment effects
 
 ```{r treatment_effect_sensitivity}
+par(las=1, mar=c(4,10,2,2), cex.lab=1.3, cex.axis=1.3, family='serif')
 my_pch = rep(1,9)
 my_pch[model_settings$mod==all_mods[3]]=2
 plot_effect_estimates(effect_ests = effect_ests,
                       plot_models = 1:9,
                       my_pch = my_pch,
                       study_threshold = study_threshold)
+legend('right', pch = 1:2, legend = c('Linear', 'Non-linear'),inset=0.03)
+legend('topright', lwd = 2, legend = 1:9, col =  brewer.pal(n = 9, name = 'Set1'),
+       inset=0.03, title = 'Model', pch = my_pch)
 ```
 
 
@@ -811,53 +852,5 @@ cor_out = cor.test(dd_RNaseP$RTS-dd_RNaseP$TSL,
                    dd_CT_NS$RTS-dd_CT_NS$TSL)
 mtext(text = sprintf('Pearson correlation is %s',round(cor_out$estimate,2)),side = 3,line = 0)
 ```
-
-
-
-### Quality Control for PCR
-
-```{r PCR_QC}
-control_dat=read.csv('../interim_control_dat.csv')
-par(las=1, mfrow=c(2,2), cex.lab=1.5, cex.axis=1.5,family='serif')
-plot(control_dat$log10_true_density,control_dat$CT_NS, 
-     ylab='CT value', 
-     xlab='Control viral density (log10 copies/mL)',
-     panel.first=grid(),
-     col=as.numeric(as.factor(control_dat$Plate)), ylim=c(40,18))
-my_slope_coefs = array(dim = c(length(unique(control_dat$Plate)),2))
-
-for(ss in unique(control_dat$Plate)){
-  plate_ind = control_dat$Plate==ss
-  mod = lm(CT_NS~log10_true_density, control_dat[plate_ind, ])
-  abline(mod,col = control_dat$Plate[plate_ind])
-  my_slope_coefs[which(ss==unique(control_dat$Plate)),]=coef(mod)
-}
-
-hist(my_slope_coefs[,1], xlab='Intercept', main='')
-writeLines(sprintf('SD of the intercept is %s',round(sd(my_slope_coefs[,1]),2)))
-
-hist(my_slope_coefs[,2], xlab='Slope', main='')
-writeLines(sprintf('Maximum difference in CT values for a tenfold change in viral load is %s',round(diff(range(my_slope_coefs[,2])),2)))
-
-xx = aggregate(CT_NS ~ Plate + log10_true_density, 
-               data = control_dat, 
-               function(x) c(mean(x), diff(x)))
-par(las=1)
-plot(xx$CT[,1], xx$CT[,2], 
-     xlab = 'Mean CT',
-     ylab = 'CT Difference from duplicates',
-     panel.first=grid())
-abline(h = 0)
-
-xx$Mean_CT = cut(xx$CT[,1],breaks = seq(20, 40, by=5),include.lowest = T)
-xx$Diff_CT = xx$CT[,2]
-
-par(mfrow=c(1,1))
-yy = aggregate(Diff_CT ~ Mean_CT, xx, sd)
-plot(yy$Mean_CT, sqrt(2) * yy$Diff_CT, xlab='CT interval',
-     ylab = 'Estimated measurement error (standard deviation)')
-```
-
-
 
 

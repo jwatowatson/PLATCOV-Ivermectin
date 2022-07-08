@@ -225,7 +225,7 @@ Display the per protocol matrix
 
 
 ```
-## We have 0 PCR datapoints on 99 patients from 3 sites between 2021-09-30 and 2022-04-18
+## We have 1992 PCR datapoints on 99 patients from 3 sites between 2021-09-30 and 2022-04-18
 ```
 
 ![](Ivermectin_Analysis_files/figure-html/data_summaries-1.png)<!-- -->
@@ -284,9 +284,8 @@ Covariates that we use in model 2:
 * Vaccination (number of doses)
 * Age (standardised to have mean=0 and sd=1)
 * Time since symptom onset (days, between 0 and 4)
-* Variant (WHO variants of concern) - when available (this is replaced by epoch until we have variant data)
+* Variant (WHO variants of concern) 
 * Serology rapid test (+/-)
-* Serum antibody: not yet decided which antibody will be measured - expected May/June 2022
 
 
 
@@ -313,13 +312,14 @@ Covariates that we use in model 2:
 
 ### Setup model runs
 
-We fit a sequence of Bayesian hierarchical models.
-To make sure there are no bugs in the code (all stan code is written specifically for this trial analysis), I fit the following sequence of models of increasing complexity:
+We fit a set of Bayesian hierarchical models.
 
-* Model 0: vanilla student-t regression with left censoring at 0 and with individual random effects for slope and intercept;
-* Model 1: add the RNaseP measurements;
-* Model 2: Add covariate adjustment;
-* Model 3: Non-linear model (up and then down) with RNaseP adjustment.
+There are three underlying stan models
+* *Linear_model_basic.stan*: vanilla student-t regression with left censoring at 0 and with individual random effects for slope and intercept;
+* *Linear_model_RNaseP.stan*: Same as before but with the RNaseP measurements;
+* *Nonlinear_model_RNaseP.stan*: Non-linear model (up and then down) with RNaseP adjustment.
+
+Models 2 and 3 are combined with either informative priors or non-informative priors, and with or without full covariate adjustment (8 combinations). Model 1 is only run with informative priors and with only key covariates.
 
 
 ```

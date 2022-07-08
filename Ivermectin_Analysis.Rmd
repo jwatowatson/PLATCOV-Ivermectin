@@ -156,14 +156,12 @@ IDs = unique(platcov_dat$ID)
 platcov_dat$Rand_date = as.POSIXct(platcov_dat$Rand_date)
 
 writeLines(sprintf('We have %s PCR datapoints on %s patients from %s sites between %s and %s',
-                   length(unique(platcov_dat$BARCODE)),
+                   nrow(platcov_dat),
                    length(IDs),
                    length(unique(platcov_dat$Site)),
                    min(platcov_dat$Rand_date),
                    max(platcov_dat$Rand_date)))
-
 ind_dup = !duplicated(platcov_dat$ID)
-
 
 par(las=1, cex.lab=1.5, cex.axis=1.5, family='serif')
 ix=order(platcov_dat$Rand_date[ind_dup])
@@ -174,7 +172,6 @@ plot(platcov_dat$Rand_date[ind_dup][ix], 1:length(IDs),
      panel.first=grid())
 legend('topleft',col = 1:length(unique(platcov_dat$Variant)),
        legend = levels(as.factor(platcov_dat$Variant[ind_dup])),pch=16,inset = 0.03)
-# legend('left',col=1, pch=c(16,1),legend = c('Genotyped','Imputed'),inset = 0.03)
 
 
 # baseline samples: taken within 6 hours of randomisation
@@ -242,9 +239,8 @@ Covariates that we use in model 2:
 * Vaccination (number of doses)
 * Age (standardised to have mean=0 and sd=1)
 * Time since symptom onset (days, between 0 and 4)
-* Variant (WHO variants of concern) - when available (this is replaced by epoch until we have variant data)
+* Variant (WHO variants of concern) 
 * Serology rapid test (+/-)
-* Serum antibody: not yet decided which antibody will be measured - expected May/June 2022
 
 
 ```{r}
@@ -283,13 +279,14 @@ stan_inputs =
 
 ### Setup model runs
 
-We fit a sequence of Bayesian hierarchical models.
-To make sure there are no bugs in the code (all stan code is written specifically for this trial analysis), I fit the following sequence of models of increasing complexity:
+We fit a set of Bayesian hierarchical models.
 
-* Model 0: vanilla student-t regression with left censoring at 0 and with individual random effects for slope and intercept;
-* Model 1: add the RNaseP measurements;
-* Model 2: Add covariate adjustment;
-* Model 3: Non-linear model (up and then down) with RNaseP adjustment.
+There are three underlying stan models
+* *Linear_model_basic.stan*: vanilla student-t regression with left censoring at 0 and with individual random effects for slope and intercept;
+* *Linear_model_RNaseP.stan*: Same as before but with the RNaseP measurements;
+* *Nonlinear_model_RNaseP.stan*: Non-linear model (up and then down) with RNaseP adjustment.
+
+Models 2 and 3 are combined with either informative priors or non-informative priors, and with or without full covariate adjustment (8 combinations). Model 1 is only run with informative priors and with only key covariates.
 
 ```{r run_models}
 all_mods = list.files('Stan_models',full.names = TRUE,pattern = '*stan')

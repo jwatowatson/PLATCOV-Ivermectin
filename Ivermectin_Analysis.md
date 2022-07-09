@@ -1,7 +1,7 @@
 ---
 title: "PLATCOV Statistical Analysis: Ivermectin"
 author: "James Watson"
-date: "08 July, 2022"
+date: "09 July, 2022"
 output:
   html_document:
     toc: yes

@@ -175,7 +175,7 @@ make_stan_inputs = function(input_data_fit,
   ind_contr = which(apply(input_data_fit[, slope_covs_base,drop=F], 2, function(x) length(unique(x))>1))
   if(length(ind_contr)>0){
     X_slope_1 = model.matrix( ~ ., 
-                            data = input_data_fit[, slope_covs_base[ind_contr],drop=F])[, -1, drop=F]
+                              data = input_data_fit[, slope_covs_base[ind_contr],drop=F])[, -1, drop=F]
   } else {
     X_slope_1 = array(dim = c(nrow(input_data_fit),0))
   }
@@ -183,7 +183,7 @@ make_stan_inputs = function(input_data_fit,
   ind_contr = which(apply(input_data_fit[, slope_covs_full,drop=F], 2, function(x) length(unique(x))>1))
   if(length(ind_contr)>0){
     X_slope_2 = model.matrix( ~ ., 
-                            data = input_data_fit[, slope_covs_full[ind_contr],drop=F])[, -1, drop=F]
+                              data = input_data_fit[, slope_covs_full[ind_contr],drop=F])[, -1, drop=F]
   } else {
     X_slope_2 = array(dim = c(nrow(input_data_fit),0))
   }
@@ -409,7 +409,7 @@ plot_coef_effects = function(stan_out, model_plot, cov_mat, stan_inputs){
   
   plot(alpha_coefs['50%', ], 1:ncol(alpha_coefs),
        xlim=xlims,yaxt='n',ylab='',bty='n',xaxt='n',
-       panel.first=grid(), xlab='Intercept (fold change)')
+       panel.first=grid(), xlab='Baseline viral load (fold change)')
   abline(v=0,lty=2,lwd=2)
   for(i in 1:ncol(alpha_coefs)){
     lines(c(alpha_coefs['10%',i], alpha_coefs['90%',i]),
@@ -422,12 +422,16 @@ plot_coef_effects = function(stan_out, model_plot, cov_mat, stan_inputs){
   x_points = signif(10^seq(xlims[1], xlims[2],length.out = 5),2)
   axis(1, at = log10(x_points), labels = x_points)
   
-  beta_coefs = apply(thetas$slope_coefs,2,quantile,
-                     probs=c(0.025,.1,.5,.9,0.975))
+  beta_coefs = apply(thetas$slope_coefs,2, function(x){
+    ys = quantile(x, probs=c(0.025,.1,.5,.9,0.975))
+    ys = 100*(exp(ys)-1)
+    ys
+  })
+  
   xlims=range(beta_coefs)
   plot(beta_coefs['50%', ], 1:ncol(beta_coefs),
        xlim=xlims,yaxt='n',ylab='',bty='n',xaxt='n',
-       panel.first=grid(), xlab='Slope (multiplicative effect)')
+       panel.first=grid(), xlab='Change in rate of clearance (%)')
   abline(v=0,lty=2,lwd=2)
   for(i in 1:ncol(beta_coefs)){
     lines(c(beta_coefs['10%',i], beta_coefs['90%',i]),
@@ -436,8 +440,8 @@ plot_coef_effects = function(stan_out, model_plot, cov_mat, stan_inputs){
           c(i,i), lwd=1)
   }
   axis(2, at =1:ncol(beta_coefs), labels = cov_names_slope, tick = F)
-  x_points = signif(10^seq(xlims[1], xlims[2],length.out = 5),2)
-  axis(1, at = log10(x_points), labels = x_points)
+  x_points = signif(seq(xlims[1], xlims[2],length.out = 5),2)
+  axis(1, at = x_points, labels = x_points)
 }
 
 # Checks a function for use of global variables

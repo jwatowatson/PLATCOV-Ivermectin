@@ -461,7 +461,21 @@ coef_mod = which(model_settings$mod == all_mods[2] &
                    model_settings$prior==1)
 
 par(mfrow=c(1,2),las=1,family='serif',mar=c(5,7,2,2))
-plot_coef_effects(stan_out = out_all,model_plot = coef_mod,cov_mat = 1,stan_inputs = stan_inputs)
+plot_coef_effects(stan_out = out_all,model_plot = coef_mod,
+                  cov_mat = 1,stan_inputs = stan_inputs)
+
+thetas = rstan::extract(stan_out[[coef_mod]])
+alpha_coefs = t(apply(thetas$intercept_coefs,2,
+                    quantile,probs=c(0.025,.1,.5,.9,0.975)))
+row.names(alpha_coefs) =
+    plyr::mapvalues(x = colnames(stan_inputs$cov_matrices$X_int[[1]]),
+                    from = c('Age_scaled','Antibody_test',
+                             'Symptom_onset','N_dose'),
+                    to = c('Age','Serology RDT',
+                           'Days since\nsymptom onset',
+                           'Number of\nvaccine doses'))
+
+print(round(10^alpha_coefs,1))
 
 coef_mod = which(model_settings$mod == all_mods[2] &
                    model_settings$cov_matrices==2 & 

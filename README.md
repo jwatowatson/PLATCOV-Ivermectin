@@ -16,7 +16,7 @@ This work is licensed under a
 
 ## Overview
 
-This github repo provides the data and code for the statistical analysis of the Ivermectin arm in the PLATCOV trial. The primary analysis of the trial consists of fitting linear and non-linear hierarchical Bayesian regression models to the serial viral load measurements over time. The regression models use left-censoring for viral loads below the lower limit of detection (i.e. a Ct value of 40 or above). The viral load is expressed as the log base 10 number of copies per mL. The statistical analysis plan used at the time of analysis is given in the file *PLATCOV_SAP_v2.1_13052022.pdf*.
+This github repo provides the data and code for the statistical analysis of the Ivermectin arm in the PLATCOV trial published in [Elife](https://elifesciences.org/articles/83201). The primary analysis of the trial consists of fitting linear and non-linear hierarchical Bayesian regression models to the serial viral load measurements over time. The regression models use left-censoring for viral loads below the lower limit of detection (i.e. a Ct value of 40 or above). The viral load is expressed as the log base 10 number of copies per mL. The statistical analysis plan used at the time of analysis is given in the file *PLATCOV_SAP_v2.1_13052022.pdf*.
 
 All models are fit to data using Monte Carlo approximation of the posterior distributions with the open access software *stan* (interface to R with *rstan*). The folder *Stan_models* contains the stan code for the three models used:
 
